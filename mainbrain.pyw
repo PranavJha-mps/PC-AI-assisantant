@@ -15,112 +15,130 @@ class Chanakya:
         self.recognizer = sr.Recognizer()
         self.is_sleeping = False
         self.mic = None
+        self.awaiting_choice = None 
+        self.pending_target = None
+        self.search_paths = [
+            os.path.join(os.environ['USERPROFILE'], 'Desktop'),
+            os.path.join(os.environ['USERPROFILE'], 'Documents'),
+            os.path.join(os.environ['USERPROFILE'], 'Videos'),
+            os.path.join(os.environ['USERPROFILE'], 'Downloads')
+        ]
 
     def speak(self, text):
         def speaker_thread():
             try:
                 engine = pyttsx3.init()
                 engine.setProperty('rate', 185)
-                # Pronunciation fixes
-                pronounce_text = text.replace("hisab", "hisaab").replace("Hisab", "Hisaab")
+                # Voice pronunciation fix
+                p_text = text.replace("hisab", "hisaab").replace("Hisab", "Hisaab")
                 print(f"Chanakya: {text}")
-                engine.say(pronounce_text)
+                engine.say(p_text)
                 engine.runAndWait()
                 engine.stop()
             except: pass
         threading.Thread(target=speaker_thread).start()
 
-    def manage_calculator(self):
-        try:
-            app = Desktop(backend="uia").window(title_re=".*Calculator.*")
-            if app.exists():
-                app.set_focus()
-                return True
-        except: pass
-        os.system("start calc")
-        time.sleep(1.2)
-        return False
+    def smart_search(self, target):
+        """Logic to handle duplicates (App vs Folder)"""
+        found_folder = None
+        for path in self.search_paths:
+            if os.path.exists(path):
+                for item in os.listdir(path):
+                    if target.lower() == item.lower() or target.lower() in item.lower():
+                        found_folder = os.path.join(path, item)
+                        break
+        
+        if found_folder:
+            self.speak(f"Malik, {target} naam ki app aur folder dono hain. Kya kholun?")
+            self.awaiting_choice = "decision"
+            self.pending_target = {"folder": found_folder, "app": target}
+            return
+        
+        # Default: Try opening as App/System search
+        self.speak(f"{target} khol raha hoon.")
+        pyautogui.press('win'); time.sleep(0.3); pyautogui.write(target); time.sleep(0.4); pyautogui.press('enter')
 
     def process_command(self, recognizer, audio):
         try:
-            query = recognizer.recognize_google(audio, language="en-IN").lower()
-            
-            # Corrections
+            query = recognizer.recognize_google(audio, language="en-IN").lower().strip()
             if "hiseb" in query: query = query.replace("hiseb", "hisab")
-            query = query.replace("chanakya", "").strip()
-            print(f"User heard: {query}")
+            print(f"User: {query}")
 
-            if self.is_sleeping:
-                if any(w in query for w in ["wake up", "uth jao"]):
-                    self.is_sleeping = False
-                    self.speak("Ji Malik, hazir hoon.")
+            # --- CHOICE HANDLING ---
+            if self.awaiting_choice == "decision":
+                if "folder" in query:
+                    os.startfile(self.pending_target["folder"])
+                    self.speak("Folder khul gaya.")
+                else:
+                    t = self.pending_target["app"]
+                    pyautogui.press('win'); time.sleep(0.3); pyautogui.write(t); time.sleep(0.4); pyautogui.press('enter')
+                    self.speak("App khol di hai.")
+                self.awaiting_choice = None
                 return
 
-            # --- 1. MATH LOGIC WITH VOICE RESULT ---
-            if any(op in query for op in ["+", "-", "x", "plus", "into", "multiplied by", "divided by"]):
-                # Cleaning query for calculation
-                math_q = query.replace("plus", "+").replace("minus", "-").replace("into", "*").replace("x", "*").replace("divided by", "/")
-                final_math = "".join([c for c in math_q if c in "0123456789+-*/."])
+            if self.is_sleeping and "wake up" not in query: return
 
-                if final_math:
-                    try:
-                        # Calculation solving
-                        result = eval(final_math)
-                        # Chanakya result bolega
-                        self.speak(f"Iska jawaab hai {result}")
-                        
-                        # Calculator mein bhi entry karega record ke liye
-                        self.manage_calculator()
-                        time.sleep(0.5)
-                        pyautogui.typewrite(final_math)
-                        pyautogui.press('enter')
-                    except:
-                        self.speak("Maaf kijiyega Malik, yeh calculation thodi mushkil hai.")
+            # --- 1. MEDIA CONTROLS (Pause/Play/Stop) ---
+            if any(w in query for w in ["pause", "stop", "roko", "play", "chalao"]):
+                pyautogui.press('space')
                 return
 
-            # --- 2. GREETINGS ---
-            if any(w in query for w in ["good boy", "shabash", "nice"]):
-                self.speak(random.choice(["Shukriya Malik!", "Dhanyawad!", "Hamesha aapki sewa mein."]))
+            # --- 2. VOLUME (Silent) ---
+            if any(w in query for w in ["volume up", "awaaz badhao"]):
+                for _ in range(10): pyautogui.press("volumeup")
                 return
-
-            # --- 3. OTHER COMMANDS ---
-            if "screenshot" in query:
-                folder = os.path.join(os.environ['USERPROFILE'], 'Pictures', 'Chanakya_Screenshots')
-                if not os.path.exists(folder): os.makedirs(folder)
-                pyautogui.screenshot().save(os.path.join(folder, f"Snap_{int(time.time())}.png"))
-                self.speak("Screenshot le liya gaya hai.")
+            if any(w in query for w in ["volume down", "awaaz kam karo"]):
+                for _ in range(10): pyautogui.press("volumedown")
                 return
-
             if "mute" in query:
                 pyautogui.press("volumemute")
                 return
 
-            if any(w in query for w in ["youtube", "google", "notepad"]):
-                self.speak("Ji khul gaya.")
-                if "youtube" in query: webbrowser.open("https://youtube.com")
-                elif "google" in query: webbrowser.open("https://google.com")
-                else: os.system("start notepad")
+            # --- 3. UNIVERSAL OPENER ---
+            if "open" in query or "kholo" in query:
+                name = query.replace("open", "").replace("kholo", "").strip()
+                if "whatsapp" in name:
+                    os.system("start whatsapp://")
+                    return
+                if "youtube" in name:
+                    webbrowser.open("https://youtube.com"); return
+                self.smart_search(name)
                 return
 
-            if any(w in query for w in ["so jao", "sleep"]):
-                self.speak("Theek hai Malik.")
-                self.is_sleeping = True
-                return
+            # --- 4. MATH ---
+            if any(op in query for op in ["+", "-", "x", "plus", "into"]):
+                math_q = query.replace("plus", "+").replace("minus", "-").replace("into", "*").replace("x", "*")
+                final_math = "".join([c for c in math_q if c in "0123456789+-*/."])
+                if final_math and any(c.isdigit() for c in final_math):
+                    try:
+                        result = eval(final_math)
+                        self.speak(f"Iska jawaab hai {result}")
+                        return
+                    except: pass
 
-            if "close" in query:
-                pyautogui.hotkey('alt', 'f4')
-                return
+            # --- 5. SYSTEM ---
+            if "time" in query:
+                self.speak(time.strftime("%I:%M %p")); return
+            if "screenshot" in query:
+                path = os.path.join(os.environ['USERPROFILE'], 'Pictures', f"Snap_{int(time.time())}.png")
+                pyautogui.screenshot().save(path)
+                self.speak("Screenshot done."); return
+            if "so jao" in query:
+                self.is_sleeping = True; self.speak("Theek hai Malik."); return
+            if "wake up" in query:
+                self.is_sleeping = False; self.speak("Main hazir hoon."); return
+            if "close" in query or "band karo" in query:
+                pyautogui.hotkey('alt', 'f4'); return
 
         except: pass
 
     def run(self):
-        print("Chanakya Starting...")
         self.mic = sr.Microphone()
-        with self.mic as source: self.recognizer.adjust_for_ambient_noise(source, duration=1.0)
+        with self.mic as source: self.recognizer.adjust_for_ambient_noise(source)
         self.recognizer.listen_in_background(self.mic, self.process_command)
-        self.speak("Pranaam Malik!")
-        icon = pystray.Icon("Chanakya", Image.new('RGB', (64, 64), color='orange'), menu=pystray.Menu(pystray.MenuItem("Exit", lambda: os._exit(0))))
-        icon.run()
+        self.speak("Chanakya Active!")
+        pystray.Icon("Chanakya", Image.new('RGB', (64, 64), color='orange'), 
+                     menu=pystray.Menu(pystray.MenuItem("Exit", lambda: os._exit(0)))).run()
 
 if __name__ == "__main__":
     Chanakya().run()
