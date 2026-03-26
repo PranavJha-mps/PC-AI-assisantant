@@ -4,189 +4,177 @@ import webbrowser
 import pyttsx3
 import speech_recognition as sr
 import pystray
-import pyautogui
 import threading
 import subprocess
-import json
 import string
-from datetime import datetime
 from PIL import Image, ImageDraw
 
 class Chanakya:
     def __init__(self):
         self.recognizer = sr.Recognizer()
-        self.script_dir = os.path.dirname(os.path.abspath(__file__))
-        self.awaiting_choice = None
-        self.pending_target = None
-        self.is_sleeping = False 
+        self.recognizer.energy_threshold = 300 
+        self.recognizer.dynamic_energy_threshold = False 
+        self.recognizer.pause_threshold = 0.8
         
-        # --- JSON GENDER LOAD ---
-        self.user_title = self.load_user_title()
-        print(f"--- Chanakya System Booting for {self.user_title} ---")
-
-    def load_user_title(self):
-        try:
-            json_path = os.path.join(self.script_dir, "user_data.json")
-            with open(json_path, "r") as f:
-                data = json.load(f)
-                return data.get("gender", "Malik")
-        except:
-            return "Malik"
+        self.processing = False 
+        self.is_sleeping = False 
+        self.user_title = "Malik"
 
     def speak(self, text):
         def speaker_thread():
             try:
                 engine = pyttsx3.init()
+                voices = engine.getProperty('voices')
+                for voice in voices:
+                    if "Hemant" in voice.name or "India" in voice.name:
+                        engine.setProperty('voice', voice.id)
+                        break
                 engine.setProperty('rate', 190)
-                full_text = f"{text} {self.user_title}"
-                print(f"Chanakya: {full_text}") 
-                engine.say(full_text)
+                engine.say(f"{text} {self.user_title}")
                 engine.runAndWait()
             except: pass
         threading.Thread(target=speaker_thread, daemon=True).start()
 
-    def open_in_chrome(self, url):
-        paths = [
-            r"C:\Program Files\Google\Chrome\Application\chrome.exe",
-            r"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe",
-            os.path.join(os.environ.get("LOCALAPPDATA", ""), r"Google\Chrome\Application\chrome.exe")
-        ]
-        for path in paths:
-            if os.path.exists(path):
-                subprocess.Popen([path, url])
-                return
-        webbrowser.open(url)
-
-    def check_local_existence(self, name):
-        drives = [f"{l}:\\" for l in string.ascii_uppercase if os.path.exists(f"{l}:\\")]
-        user_profile = os.environ['USERPROFILE']
-        paths = [os.path.join(user_profile, 'Desktop'), os.path.join(user_profile, 'Downloads'), os.path.join(user_profile, 'Documents')]
-        paths.extend(drives)
-        for p in paths:
-            if os.path.exists(p):
-                try:
-                    if any(name.lower() in f.lower() for f in os.listdir(p)): return True
-                except: continue
-        return False
-
-    def launch_app(self, name):
-        pyautogui.press('win'); time.sleep(0.4)
-        pyautogui.write(name); time.sleep(0.6)
-        pyautogui.press('enter')
-
-    def process_command(self, recognizer, audio):
+    def call_cpp(self, task):
+        """C++ Controller Bridge"""
         try:
-            print("\nListening Done...")
-            query = recognizer.recognize_google(audio, language="en-IN").lower().strip()
-            print(f"User Said: {query}")
+            exe_path = os.path.join(os.getcwd(), "output", "controller.exe")
+            if not os.path.exists(exe_path):
+                exe_path = os.path.join(os.getcwd(), "controller.exe")
+            subprocess.run([exe_path, task], creationflags=0x08000000)
+        except: print("C++ Engine not found!")
 
-            # 1. EXIT & CLOSE
-            if any(w in query for w in ["close", "band karo", "hatao"]):
-                if "chanakya" in query:
-                    self.speak("Alvida")
-                    os._exit(0)
-                pyautogui.keyDown('alt'); pyautogui.press('f4'); pyautogui.keyUp('alt')
+    def get_active_drives(self):
+        return [f"{l}:\\" for l in string.ascii_uppercase if os.path.exists(f"{l}:\\")]
+
+    def deep_pc_scan(self, filename):
+        """PC mein saari matching files/folders dhoondhne ke liye"""
+        drives = self.get_active_drives()
+        matches = []
+        for drive in drives:
+            try:
+                # 'where' command files aur folders dono dhoond leta hai
+                cmd = f'where /R "{drive}" *{filename}*'
+                output = subprocess.check_output(cmd, shell=True, stderr=subprocess.STDOUT)
+                paths = output.decode('utf-8', errors='ignore').split('\r\n')
+                for p in paths:
+                    clean_path = p.strip()
+                    if clean_path and not clean_path.lower().endswith(".lnk"):
+                        matches.append(clean_path)
+            except: continue
+        return list(set(matches)) # Remove duplicates
+
+    def ask_user_choice(self, matches):
+        """Agar multiple files milein toh selection logic"""
+        count = len(matches)
+        if count > 3: count = 3 # Limit to top 3 for speed
+        
+        self.speak(f"Mujhe {count} matching files mili hain. Kaunsi wali kholun?")
+        
+        for i in range(count):
+            fname = os.path.basename(matches[i])
+            parent = os.path.dirname(matches[i]).split('\\')[-1]
+            print(f"[{i+1}] {fname} in folder: {parent}")
+
+        self.speak("Aap pehli, doosri, ya teesri bol kar chun sakte hain.")
+
+        with sr.Microphone() as source:
+            try:
+                audio = self.recognizer.listen(source, timeout=7)
+                choice = self.recognizer.recognize_google(audio, language="en-IN").lower()
+                
+                if "pehli" in choice or "first" in choice or "1" in choice: return matches[0]
+                elif "doosri" in choice or "second" in choice or "2" in choice: return matches[1]
+                elif "teesri" in choice or "third" in choice or "3" in choice: return matches[2]
+            except: pass
+        return None
+
+    def process_logic(self, query):
+        query = query.lower().strip()
+        if not query: return
+        print(f"Command: {query}")
+
+        # --- SLEEP/WAKE ---
+        if self.is_sleeping:
+            if "jaag jao" in query or "wake up" in query:
+                self.is_sleeping = False
+                self.speak("Main hazir hoon")
+            return
+        if "so jao" in query or "sleep" in query:
+            self.is_sleeping = True
+            self.speak("Theek hai malik")
+            return
+
+        # --- C++ SYSTEM COMMANDS ---
+        if "screenshot" in query: self.call_cpp("screenshot"); self.speak("Done")
+        elif "volume up" in query: self.call_cpp("vol_up")
+        elif "volume down" in query: self.call_cpp("vol_down")
+        elif "mute" in query: self.call_cpp("vol_mute")
+        elif "copy" in query: self.call_cpp("copy_line"); self.speak("Copied")
+        elif "paste" in query: self.call_cpp("paste")
+        elif "close" in query or "band karo" in query: self.call_cpp("close")
+
+        # --- OPEN LOGIC (APP -> FILE -> WEB) ---
+        elif "kholo" in query or "open" in query:
+            target = query.replace("kholo","").replace("open","").strip()
+            
+            # 1. Desktop Apps Priority
+            apps = {"whatsapp": "whatsapp:", "ppt": "powerpnt", "word": "winword", "blender": "blender"}
+            if target in apps:
+                self.speak(f"{target} khol raha hoon")
+                subprocess.Popen(f"start {apps[target]}", shell=True)
                 return
 
-            # 2. SLEEP & WAKE
-            if any(w in query for w in ["so jao", "sleep mode"]):
-                self.is_sleeping = True
-                self.speak("Main so raha hoon")
-                return
+            # 2. PC Scan for Files/Folders
+            self.speak(f"{target} ko dhoond raha hoon")
+            matches = self.deep_pc_scan(target)
 
-            if self.is_sleeping:
-                if any(w in query for w in ["jaag jao", "wake up", "utho"]):
-                    self.is_sleeping = False
-                    self.speak("Main hazir hoon")
-                return 
+            if not matches:
+                self.speak("PC mein nahi mila, Google kar raha hoon")
+                webbrowser.open(f"https://www.google.com/search?q={target}")
+            elif len(matches) == 1:
+                os.startfile(matches[0])
+                self.speak("Mil gaya, khol raha hoon")
+            else:
+                choice = self.ask_user_choice(matches)
+                if choice: os.startfile(choice)
 
-            # 3. CHOICE HANDLING (App vs Folder)
-            if self.awaiting_choice == "decision":
-                if any(w in query for w in ["folder", "file", "niche wala"]):
-                    self.speak(f"{self.pending_target} folder khol raha hoon")
-                    file_py = os.path.join(self.script_dir, "file.py")
-                    subprocess.Popen(f'python "{file_py}" "{self.pending_target}"', shell=True)
-                elif any(w in query for w in ["app", "software", "upar wala"]):
-                    self.launch_app(self.pending_target)
-                self.awaiting_choice = None
-                return
+        # --- YOUTUBE & MATH ---
+        elif "youtube" in query and "play" in query:
+            song = query.replace("youtube","").replace("play","").strip()
+            webbrowser.open(f"https://www.youtube.com/results?search_query={song}")
+            time.sleep(5); self.call_cpp("enter")
+        
+        elif any(c.isdigit() for c in query):
+            math_q = query.replace("into","*").replace("x","*").replace("plus","+").replace("minus","-")
+            exp = "".join(c for c in math_q if c in "0123456789+-*/. ").strip()
+            try: self.speak(f"Iska jawab {eval(exp)} hai")
+            except: pass
 
-            # 4. MATH LOGIC
-            is_math = any(char.isdigit() for char in query) or any(w in query for w in ["plus", "minus", "multiply", "divide", "square"])
-            if is_math and not any(w in query for w in ["youtube", "whatsapp", "folder", "search"]):
-                math_query = query.replace("plus", "+").replace("minus", "-").replace("multiply", "*").replace("divide", "/").replace("square", "**2")
-                final_exp = "".join(c for c in math_query if c in "0123456789+-*/. ").strip()
-                if len(final_exp) > 1:
+    def start_listening(self):
+        with sr.Microphone() as source:
+            self.speak("Chanakya v5 online")
+            while True:
+                if not self.processing:
                     try:
-                        res = eval(final_exp)
-                        self.speak(f"Iska jawab {res} hai")
-                        subprocess.Popen('calc.exe'); time.sleep(1.2)
-                        pyautogui.write(final_exp.replace("**2", "q"), interval=0.05)
-                        pyautogui.press('enter')
-                        return
-                    except: pass
-
-            # 5. SCREENSHOT LOGIC (Added back)
-            if "screenshot" in query:
-                folder_path = os.path.join(os.environ['USERPROFILE'], 'Pictures', 'Chanakya_Snaps')
-                if not os.path.exists(folder_path): os.makedirs(folder_path)
-                file_name = f"Snap_{datetime.now().strftime('%Y-%m-%d_%H-%M-%S')}.png"
-                pyautogui.screenshot(os.path.join(folder_path, file_name))
-                self.speak("Screenshot le liya hai")
-                return
-
-            # 6. VOLUME CONTROL
-            if "volume" in query:
-                for _ in range(5): pyautogui.press('volumeup' if "volume up" in query else 'volumedown')
-                return
-
-            # 7. OPENER & GOOGLE SEARCH (Chrome Direct)
-            if any(w in query for w in ["open", "kholo", "search"]):
-                target = query.replace("open", "").replace("kholo", "").replace("search", "").strip()
-                
-                if "youtube" in query:
-                    st = target.replace("youtube", "").strip()
-                    self.speak("YouTube par dekh lijiye")
-                    self.open_in_chrome(f"https://www.youtube.com/results?search_query={st}")
-                    return
-                
-                if "folder" in query or "file" in query:
-                    clean = target.replace("folder", "").replace("file", "").strip()
-                    subprocess.Popen(f'python "{os.path.join(self.script_dir, "file.py")}" "{clean}"', shell=True)
-                    return
-
-                if self.check_local_existence(target) and target:
-                    self.speak(f"{target} mila hai. App ya Folder?")
-                    self.awaiting_choice = "decision"; self.pending_target = target
-                else:
-                    self.launch_app(target)
-                return
-
-            # 8. UNIVERSAL FALLBACK (Google Search)
-            if len(query) > 2:
-                self.speak("Theek hai, Google par dekh lijiye")
-                self.open_in_chrome(f"https://www.google.com/search?q={query}")
-
-        except Exception as e: print(f"Error: {e}")
-
-    def run_voice(self):
-        try:
-            self.mic = sr.Microphone()
-            with self.mic as s: 
-                self.recognizer.pause_threshold = 2.2
-                self.recognizer.adjust_for_ambient_noise(s, duration=0.8)
-            self.recognizer.listen_in_background(self.mic, self.process_command)
-            self.speak("Chanakya taiyar hai")
-        except: pass
+                        self.recognizer.adjust_for_ambient_noise(source, duration=0.5)
+                        audio = self.recognizer.listen(source, timeout=None, phrase_time_limit=6)
+                        def handle(audio_data):
+                            self.processing = True
+                            try:
+                                text = self.recognizer.recognize_google(audio_data, language="en-IN")
+                                self.process_logic(text)
+                            except: pass
+                            self.processing = False
+                        threading.Thread(target=handle, args=(audio,), daemon=True).start()
+                    except: continue
 
     def run(self):
-        threading.Thread(target=self.run_voice, daemon=True).start()
+        threading.Thread(target=self.start_listening, daemon=True).start()
         img = Image.new('RGB', (64, 64), (255, 255, 255))
         d = ImageDraw.Draw(img); d.ellipse((10, 10, 54, 54), fill=(255, 165, 0))
-        self.icon = pystray.Icon("Chanakya", img, "Chanakya", menu=pystray.Menu(pystray.MenuItem("Exit", lambda: os._exit(0))))
-        try: self.icon.run()
-        except: 
-            while True: time.sleep(1)
+        icon = pystray.Icon("Chanakya", img, "Chanakya", menu=pystray.Menu(pystray.MenuItem("Exit", lambda: os._exit(0))))
+        icon.run()
 
 if __name__ == "__main__":
     Chanakya().run()
